@@ -36,18 +36,53 @@ def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
 
 
-# UI theme / palette (clean, muted colors)
-PALETTE = {
+# UI themes / palettes
+PALETTE_LIGHT = {
     'bg': '#f5f7fb',         # window background
     'panel': '#ffffff',      # panel background
     'muted': '#6b7280',      # secondary text
     'accent': '#2563eb',     # primary blue
+    'accent_hover': '#1d4ed8',
     'accent_light': '#eff6ff',
     'accent_alt': '#10b981', # green
+    'accent_alt_hover': '#059669',
     'danger': '#ef4444',
+    'danger_hover': '#dc2626',
     'card_border': '#e6edf3',
-    'dark': '#0f172a'
+    'dark': '#0f172a',
+    'text': '#0f172a'
 }
+
+PALETTE_DARK = {
+    # Based on provided palette mapping for dark mode
+    # PRIMARY_DARK_BACKGROUND
+    'bg': '#030812',
+    # SECONDARY_BACKGROUND / PANEL_BG
+    'panel': '#020764',
+    # Muted helper text
+    'muted': '#888888',
+    # PRIMARY_ACCENT / ACTIVE_STATE
+    'accent': '#025EC4',
+    # CARD_BACKGROUND / ACCENT_HOVER
+    'accent_hover': '#043780',
+    # Neutral/secondary surfaces for light-styled buttons
+    'accent_light': '#043780',
+    # SECONDARY_ACCENT / HIGHLIGHT (teal)
+    'accent_alt': '#0ECCED',
+    # Slightly darker teal for hover
+    'accent_alt_hover': '#0BB6D1',
+    # Errors
+    'danger': '#E74C3C',
+    'danger_hover': '#c0392b',
+    # Card/border separators
+    'card_border': '#043780',
+    # General light text on dark
+    'dark': '#E0E0E0',
+    'text': '#E0E0E0'
+}
+
+# Default palette
+PALETTE = dict(PALETTE_LIGHT)
 
 # Font presets
 HEADER_FONT = ('Segoe UI', 14, 'bold')
@@ -61,6 +96,8 @@ class WholeFaceScanGUI:
         self.root = root
         self.root.title('Whole-Face Multi-View Enrollment')
         self.root.geometry('1100x700')
+        self.theme = 'light'
+        self.palette = PALETTE
         # models
         self.yunet = None
         self.arcface = None
@@ -80,6 +117,76 @@ class WholeFaceScanGUI:
         # now load models (statusbar created by create_ui)
         self.load_models()
 
+    # ------------- Theming helpers -------------
+    def apply_theme(self):
+        P = self.palette
+        try:
+            self.root.configure(bg=P['bg'])
+            # Topbar
+            if hasattr(self, 'topbar'):
+                self.topbar.configure(bg=P['panel'], highlightbackground=P['card_border'])
+                self.title_lbl.configure(bg=P['panel'], fg=P['text'])
+                self.theme_btn.configure(bg=P['accent_light'], fg=P['text'], activebackground=P['accent_light'])
+            # Main frames
+            if hasattr(self, 'main'):
+                self.main.configure(bg=P['bg'])
+            if hasattr(self, 'left_frame'):
+                self.left_frame.configure(bg=P['panel'], highlightbackground=P['card_border'])
+            if hasattr(self, 'right_frame'):
+                self.right_frame.configure(bg=P['panel'], highlightbackground=P['card_border'])
+            # Entry and dropdown styling (best-effort on Tk)
+            if hasattr(self, 'user_entry'):
+                try:
+                    self.user_entry.configure(bg=P['accent_light'], fg=P['text'], insertbackground=P['text'], highlightthickness=1, highlightbackground=P['card_border'], relief='flat')
+                except Exception:
+                    pass
+            if hasattr(self, 'session_menu'):
+                try:
+                    self.session_menu.configure(bg=P['accent_light'], fg=P['text'], activebackground=P['accent_hover'], activeforeground=P['text'], highlightthickness=1)
+                except Exception:
+                    pass
+            # Statusbar
+            if hasattr(self, 'statusbar') and self.statusbar is not None:
+                self.statusbar.configure(bg=P['bg'], fg=P['muted'])
+        except Exception:
+            pass
+
+    def toggle_theme(self):
+        # Switch between light and dark palettes
+        if self.theme == 'light':
+            self.theme = 'dark'
+            for k in list(PALETTE.keys()):
+                PALETTE[k] = PALETTE_DARK.get(k, PALETTE[k])
+        else:
+            self.theme = 'light'
+            for k in list(PALETTE.keys()):
+                PALETTE[k] = PALETTE_LIGHT.get(k, PALETTE[k])
+        self.palette = PALETTE
+        self.apply_theme()
+
+    def make_button(self, parent, text, command=None, kind='accent'):
+        """Create a styled button with hover effects.
+        kind: 'accent' | 'alt' | 'danger' | 'light'
+        """
+        P = self.palette
+        if kind == 'accent':
+            bg = P['accent']; hover = P['accent_hover']; fg = 'white'
+        elif kind == 'alt':
+            bg = P['accent_alt']; hover = P['accent_alt_hover']; fg = 'white'
+        elif kind == 'danger':
+            bg = P['danger']; hover = P['danger_hover']; fg = 'white'
+        else:
+            bg = P['accent_light']; hover = P['accent_light']; fg = P['text']
+        btn = tk.Button(parent, text=text, command=command, bg=bg, fg=fg, font=BTN_FONT, relief='flat', padx=10, pady=6, activebackground=hover, activeforeground=fg, cursor='hand2')
+        # hover effects
+        def _enter(e):
+            e.widget.configure(bg=hover)
+        def _leave(e):
+            e.widget.configure(bg=bg)
+        btn.bind('<Enter>', _enter)
+        btn.bind('<Leave>', _leave)
+        return btn
+
     def load_models(self):
         self.status('Loading models...')
         try:
@@ -92,24 +199,31 @@ class WholeFaceScanGUI:
 
     def create_ui(self):
         # root background
-        try:
-            self.root.configure(bg=PALETTE['bg'])
-        except Exception:
-            pass
+        # Top App Bar
+        self.topbar = tk.Frame(self.root, bg=PALETTE['panel'], height=48, highlightthickness=1, highlightbackground=PALETTE['card_border'])
+        self.topbar.pack(fill='x', side='top')
+        self.title_lbl = tk.Label(self.topbar, text='😎 Whole-Face Enrollment & Matching', font=('Segoe UI', 13, 'bold'), bg=PALETTE['panel'], fg=PALETTE['text'])
+        self.title_lbl.pack(side='left', padx=12, pady=8)
+        self.theme_btn = self.make_button(self.topbar, text='Toggle Theme', command=self.toggle_theme, kind='light')
+        self.theme_btn.pack(side='right', padx=12, pady=6)
 
         main = tk.Frame(self.root, bg=PALETTE['bg'])
         main.pack(fill='both', expand=True, padx=16, pady=16)
+        self.main = main
 
         left = tk.Frame(main, width=520, bg=PALETTE['panel'], bd=0, highlightthickness=1, highlightbackground=PALETTE['card_border'])
         left.pack(side='left', fill='y', padx=(0,12), pady=0)
         right = tk.Frame(main, width=520, bg=PALETTE['panel'], bd=0, highlightthickness=1, highlightbackground=PALETTE['card_border'])
         right.pack(side='left', fill='both', expand=True, padx=(0,0), pady=0)
+        self.left_frame = left
+        self.right_frame = right
 
         # Enrollment box
-        tk.Label(left, text='Enrollment', font=HEADER_FONT, bg=PALETTE['panel'], fg=PALETTE['dark']).pack(anchor='w', padx=12, pady=(12,6))
+        tk.Label(left, text='Enrollment', font=HEADER_FONT, bg=PALETTE['panel'], fg=PALETTE['text']).pack(anchor='w', padx=12, pady=(12,6))
         tk.Label(left, text='User ID:', font=LABEL_FONT, bg=PALETTE['panel'], fg=PALETTE['muted']).pack(anchor='w', pady=(6,0), padx=12)
         ent = tk.Entry(left, textvariable=self.user_id, width=30, font=LABEL_FONT)
         ent.pack(anchor='w', padx=12, pady=(4,8))
+        self.user_entry = ent
 
         imgs_frame = tk.Frame(left, bg=PALETTE['panel'])
         imgs_frame.pack(fill='x', pady=8, padx=8)
@@ -119,16 +233,16 @@ class WholeFaceScanGUI:
             col = tk.Frame(imgs_frame, bd=1, relief='flat', width=160, height=200, bg=PALETTE['panel'])
             col.grid(row=0, column=i, padx=6)
             tk.Label(col, text=key.capitalize(), font=LABEL_FONT, bg=PALETTE['panel'], fg=PALETTE['muted']).pack(pady=(6,0))
-            canvas = tk.Canvas(col, width=150, height=150, bg='#111', highlightthickness=0)
+            canvas = tk.Canvas(col, width=150, height=150, bg=PALETTE['bg'], highlightthickness=0)
             canvas.pack(padx=6, pady=6)
-            btn = tk.Button(col, text='Load', command=lambda k=key: self.load_enroll_image(k), bg=PALETTE['accent'], fg='white', font=BTN_FONT, relief='flat', padx=8, pady=4)
+            btn = self.make_button(col, text='Load', command=lambda k=key: self.load_enroll_image(k), kind='light')
             btn.pack(pady=(0,8))
             # store canvas for thumbnail
             self.thumbs[key] = {'canvas': canvas, 'image': None, 'path': None}
 
-        tk.Button(left, text='Enroll User', bg=PALETTE['accent_alt'], fg='white', font=BTN_FONT, command=self.enroll_user, relief='flat').pack(pady=12, padx=12, fill='x')
-        tk.Button(left, text='Batch Enroll (CSV)', command=self.batch_enroll_csv, bg=PALETTE['accent_light'], relief='flat').pack(pady=6, padx=12, fill='x')
-        tk.Button(left, text='Export Enrollments', command=self.export_enrollments, bg=PALETTE['accent_light'], relief='flat').pack(pady=6, padx=12, fill='x')
+        self.make_button(left, text='Enroll User', command=self.enroll_user, kind='accent').pack(pady=12, padx=12, fill='x')
+        self.make_button(left, text='Batch Enroll (CSV)', command=self.batch_enroll_csv, kind='alt').pack(pady=6, padx=12, fill='x')
+        self.make_button(left, text='Export Enrollments', command=self.export_enrollments, kind='alt').pack(pady=6, padx=12, fill='x')
 
         # Enrollment status
         self.enroll_status = tk.Label(left, text='Ready', anchor='w', bg=PALETTE['panel'])
@@ -142,27 +256,34 @@ class WholeFaceScanGUI:
         self.session_menu.pack(anchor='w', padx=12, pady=(4,6))
         sess_ctl = tk.Frame(left, bg=PALETTE['panel'])
         sess_ctl.pack(fill='x', padx=12)
-        tk.Button(sess_ctl, text='Set Session', command=self.set_session_user, bg=PALETTE['accent'], fg='white', relief='flat').pack(side='left', padx=4, pady=6)
-        tk.Button(sess_ctl, text='Refresh Users', command=self.refresh_enrolled_users, bg=PALETTE['accent_light'], relief='flat').pack(side='left', padx=4)
+        self.make_button(sess_ctl, text='Set Session', command=self.set_session_user, kind='alt').pack(side='left', padx=4, pady=6)
+        self.make_button(sess_ctl, text='Refresh Users', command=self.refresh_enrolled_users, kind='light').pack(side='left', padx=4)
         # populate menu
         self.current_session_user = ''
         self.refresh_enrolled_users()
 
         # Matching panel
-        tk.Label(right, text='Matching', font=HEADER_FONT, bg=PALETTE['panel'], fg=PALETTE['dark']).pack(anchor='w', padx=12, pady=(12,6))
+        tk.Label(right, text='Matching', font=HEADER_FONT, bg=PALETTE['panel'], fg=PALETTE['text']).pack(anchor='w', padx=12, pady=(12,6))
         match_frame = tk.Frame(right, bg=PALETTE['panel'])
         match_frame.pack(fill='x', pady=6, padx=12)
-        tk.Button(match_frame, text='Load Test Image', command=self.load_test_image, bg=PALETTE['accent_light'], relief='flat').pack(side='left')
-        tk.Button(match_frame, text='Match', bg=PALETTE['accent'], fg='white', command=self.match_test, relief='flat').pack(side='left', padx=8)
-        tk.Button(match_frame, text='Match All Faces', bg=PALETTE['danger'], fg='white', command=self.match_all_faces, relief='flat').pack(side='left', padx=8)
+        self.make_button(match_frame, text='Load Test Image', command=self.load_test_image, kind='light').pack(side='left')
+        self.make_button(match_frame, text='🔎 Match', command=self.match_test, kind='accent').pack(side='left', padx=8)
+        self.make_button(match_frame, text='👥 Match All', command=self.match_all_faces, kind='danger').pack(side='left', padx=8)
         # threshold control
         tk.Label(match_frame, text='Threshold:', font=LABEL_FONT, bg=PALETTE['panel'], fg=PALETTE['muted']).pack(side='left', padx=(16,4))
         self.match_threshold = tk.DoubleVar(value=1.25)
-        self.threshold_slider = tk.Scale(match_frame, from_=0.8, to=1.8, resolution=0.01, orient='horizontal', length=160, variable=self.match_threshold)
+        def _on_thresh(val):
+            try:
+                self.threshold_val_lbl.configure(text=f"{float(val):.2f}")
+            except Exception:
+                pass
+        self.threshold_slider = tk.Scale(match_frame, from_=0.8, to=1.8, resolution=0.01, orient='horizontal', length=160, variable=self.match_threshold, command=_on_thresh, showvalue=False, bg=PALETTE['panel'], highlightthickness=0)
         self.threshold_slider.pack(side='left', padx=6)
+        self.threshold_val_lbl = tk.Label(match_frame, text=f"{self.match_threshold.get():.2f}", font=LABEL_FONT, bg=PALETTE['panel'], fg=PALETTE['muted'])
+        self.threshold_val_lbl.pack(side='left')
 
         # test image preview
-        self.test_canvas = tk.Canvas(right, width=360, height=360, bg='#0b1220', highlightthickness=0)
+        self.test_canvas = tk.Canvas(right, width=360, height=360, bg=PALETTE['bg'], highlightthickness=0)
         self.test_canvas.pack(pady=8, padx=12)
 
         # results list
@@ -179,7 +300,7 @@ class WholeFaceScanGUI:
             f.grid(row=0, column=i, padx=6)
             lbl = tk.Label(f, text=key.capitalize())
             lbl.pack()
-            c = tk.Canvas(f, width=120, height=120, bg='#222')
+            c = tk.Canvas(f, width=120, height=120, bg=PALETTE['panel'])
             c.pack()
             dlab = tk.Label(f, text='dist: -')
             dlab.pack()
@@ -191,6 +312,9 @@ class WholeFaceScanGUI:
             self.statusbar.pack(side='bottom', fill='x')
         except Exception:
             self.statusbar = None
+
+        # Apply theme styling to top-level elements
+        self.apply_theme()
 
     def _parse_detector_faces(self, det_out, img_shape):
         """Normalize detector output into list of dicts with box(x,y,w,h), landmarks(np.array 5x2) and score"""
@@ -278,6 +402,11 @@ class WholeFaceScanGUI:
             return
         self.current_session_user = val
         messagebox.showinfo('Session', f'Session user set to: {val}')
+        # display user's enrolled views if available
+        try:
+            self.show_session_user_views(val)
+        except Exception:
+            pass
 
     def match_all_faces(self):
         """Detect all faces in the loaded test image and match each against enrollments."""
@@ -479,6 +608,38 @@ class WholeFaceScanGUI:
                 pass
             self.refresh_enrolled_users()
             messagebox.showinfo('Enrolled', f'User {uid} enrolled with views: {provided}\nSet as session user')
+            # show saved views on the right panel
+            try:
+                self.show_session_user_views(uid)
+            except Exception:
+                pass
+
+    def show_session_user_views(self, uid: str):
+        """Load and display the enrolled aligned images (front/left/right) for the given user.
+        Looks for face_pipeline/enrollments/<uid>/(front|left|right).png saved during enrollment.
+        """
+        user_dir = ENROLL_DIR / uid
+        for key in ['front','left','right']:
+            cinfo = self.view_canvases.get(key)
+            if cinfo is None:
+                continue
+            c = cinfo['canvas']
+            c.delete('all')
+            img_path = user_dir / f"{key}.png"
+            if img_path.exists():
+                try:
+                    pil = Image.open(str(img_path)).convert('RGB')
+                    pil.thumbnail((120,120))
+                    imgtk = ImageTk.PhotoImage(pil)
+                    cw = c.winfo_width() or 120
+                    ch = c.winfo_height() or 120
+                    c.create_image(cw//2, ch//2, image=imgtk, anchor='center')
+                    cinfo['image'] = imgtk
+                    cinfo['label'].config(text=f"{key}")
+                except Exception:
+                    cinfo['label'].config(text=f"{key}: (error)")
+            else:
+                cinfo['label'].config(text=f"{key}: (missing)")
 
     def _detect_first_face(self, detector, img_bgr):
         h,w = img_bgr.shape[:2]

@@ -1,0 +1,8 @@
+# Ignore large model binaries
+Models/*.onnx
+.vscode/
+__pycache__/
+.venv/
+env/
+*.pyc
+outputs/
