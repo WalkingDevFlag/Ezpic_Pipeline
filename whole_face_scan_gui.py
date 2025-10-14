@@ -1,50 +1,42 @@
-"""
-whole_face_scan_gui.py
-
-Tkinter GUI for multi-view enrollment (front/left/right) and matching.
-Stores enrollments at face_pipeline/enrollments/<user_id>/embeddings.npz
-
-Controls:
-- Enrollment panel: user id input, three load buttons (front/left/right), thumbnails, Enroll button
-- Matching panel: load test image, Match button, results list
-
-"""
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from pathlib import Path
 import numpy as np
 import cv2
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
+import threading, queue
 import os
-
+import shutil
+import csv
 import sys
+# Ensure WORKING code directory is in path
 ROOT = Path(__file__).parent.resolve()
 WORKING = ROOT / 'WORKING CODE'
 if str(WORKING) not in sys.path:
     sys.path.insert(0, str(WORKING))
 
+# Import external modules (assumed to be correct)
 from arcface_pipeline import load_yunet_model, load_arcface_model
 from face_alignment import align_and_crop
 from arcface_embedder import generate_arcface_embedding, calculate_distance
-import shutil
-import csv
-
+# --- Setup Directory ---
 ENROLL_DIR = Path('face_pipeline') / 'enrollments'
-
-
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
 
 
-# UI themes / palettes
+# =============================================================================
+# UI THEME / PALETTES (FINALIZED DARK MODE)
+# =============================================================================
+
 PALETTE_LIGHT = {
-    'bg': '#f5f7fb',         # window background
-    'panel': '#ffffff',      # panel background
-    'muted': '#6b7280',      # secondary text
-    'accent': '#2563eb',     # primary blue
+    'bg': '#f5f7fb',
+    'panel': '#ffffff',
+    'muted': '#6b7280',
+    'accent': '#2563eb',
     'accent_hover': '#1d4ed8',
     'accent_light': '#eff6ff',
-    'accent_alt': '#10b981', # green
+    'accent_alt': '#10b981',
     'accent_alt_hover': '#059669',
     'danger': '#ef4444',
     'danger_hover': '#dc2626',
@@ -54,35 +46,34 @@ PALETTE_LIGHT = {
 }
 
 PALETTE_DARK = {
-    # Based on provided palette mapping for dark mode
-    # PRIMARY_DARK_BACKGROUND
-    'bg': '#030812',
-    # SECONDARY_BACKGROUND / PANEL_BG
+    # 030812 (Deep Black-Blue)
+    'bg': '#030812', 
+    # 020764 (Rich Dark Blue)
     'panel': '#020764',
-    # Muted helper text
-    'muted': '#888888',
-    # PRIMARY_ACCENT / ACTIVE_STATE
-    'accent': '#025EC4',
-    # CARD_BACKGROUND / ACCENT_HOVER
-    'accent_hover': '#043780',
-    # Neutral/secondary surfaces for light-styled buttons
+    # 043780 (Mid-Tone Blue / Light Surface)
     'accent_light': '#043780',
-    # SECONDARY_ACCENT / HIGHLIGHT (teal)
+    # 043780 (Card/Border)
+    'card_border': '#043780',
+    # 025EC4 (Bright Blue / Primary Action)
+    'accent': '#025EC4',
+    # 043780 (Accent Hover)
+    'accent_hover': '#043780',
+    # 0ECCED (Vibrant Teal / Secondary Action & Success)
     'accent_alt': '#0ECCED',
-    # Slightly darker teal for hover
+    # 0BB6D1 (Slightly darker teal for hover)
     'accent_alt_hover': '#0BB6D1',
     # Errors
     'danger': '#E74C3C',
     'danger_hover': '#c0392b',
-    # Card/border separators
-    'card_border': '#043780',
     # General light text on dark
-    'dark': '#E0E0E0',
-    'text': '#E0E0E0'
+    'text': '#E0E0E0', 
+    # Muted helper text
+    'muted': '#888888',
+    'dark': '#E0E0E0'
 }
 
-# Default palette
-PALETTE = dict(PALETTE_LIGHT)
+# Default palette starts as DARK for modern aesthetic
+PALETTE = dict(PALETTE_DARK)
 
 # Font presets
 HEADER_FONT = ('Segoe UI', 14, 'bold')
@@ -96,8 +87,9 @@ class WholeFaceScanGUI:
         self.root = root
         self.root.title('Whole-Face Multi-View Enrollment')
         self.root.geometry('1100x700')
-        self.theme = 'light'
+        self.theme = 'dark' # Start in dark mode
         self.palette = PALETTE
+        
         # models
         self.yunet = None
         self.arcface = None
@@ -113,61 +105,84 @@ class WholeFaceScanGUI:
 
         # build UI
         self.create_ui()
-
-        # now load models (statusbar created by create_ui)
         self.load_models()
+        self.apply_theme() # Apply initial dark theme after widgets are created
 
     # ------------- Theming helpers -------------
     def apply_theme(self):
         P = self.palette
         try:
             self.root.configure(bg=P['bg'])
+            
             # Topbar
             if hasattr(self, 'topbar'):
                 self.topbar.configure(bg=P['panel'], highlightbackground=P['card_border'])
                 self.title_lbl.configure(bg=P['panel'], fg=P['text'])
                 self.theme_btn.configure(bg=P['accent_light'], fg=P['text'], activebackground=P['accent_light'])
+            
             # Main frames
-            if hasattr(self, 'main'):
-                self.main.configure(bg=P['bg'])
-            if hasattr(self, 'left_frame'):
-                self.left_frame.configure(bg=P['panel'], highlightbackground=P['card_border'])
-            if hasattr(self, 'right_frame'):
-                self.right_frame.configure(bg=P['panel'], highlightbackground=P['card_border'])
-            # Entry and dropdown styling (best-effort on Tk)
-            if hasattr(self, 'user_entry'):
-                try:
-                    self.user_entry.configure(bg=P['accent_light'], fg=P['text'], insertbackground=P['text'], highlightthickness=1, highlightbackground=P['card_border'], relief='flat')
-                except Exception:
-                    pass
-            if hasattr(self, 'session_menu'):
-                try:
-                    self.session_menu.configure(bg=P['accent_light'], fg=P['text'], activebackground=P['accent_hover'], activeforeground=P['text'], highlightthickness=1)
-                except Exception:
-                    pass
-            # Statusbar
+            if hasattr(self, 'main'): self.main.configure(bg=P['bg'])
+            if hasattr(self, 'left_frame'): self.left_frame.configure(bg=P['panel'], highlightbackground=P['card_border'])
+            if hasattr(self, 'right_frame'): self.right_frame.configure(bg=P['panel'], highlightbackground=P['card_border'])
+            
+            # Labels, Listbox, Menu, Entry styling
+            for widget in self.root.winfo_children():
+                if isinstance(widget, tk.Frame) or isinstance(widget, tk.Label):
+                    self._recolor_recursive(widget)
+
+            # Specific Listbox and Entry coloring (Tkinter styling is limited)
+            self.results_list.configure(bg=P['card_border'], fg=P['text'], selectbackground=P['accent_hover'], selectforeground=P['text'])
+            self.user_entry.configure(bg=P['accent_light'], fg=P['text'], insertbackground=P['text'], highlightbackground=P['card_border'])
+            self.session_menu.configure(bg=P['accent_light'], fg=P['text'], highlightbackground=P['card_border'])
+            self.threshold_slider.configure(bg=P['panel'], troughcolor=P['card_border'], fg=P['text'])
+            self.test_canvas.configure(bg=P['card_border'])
+            
             if hasattr(self, 'statusbar') and self.statusbar is not None:
                 self.statusbar.configure(bg=P['bg'], fg=P['muted'])
-        except Exception:
-            pass
+                
+        except Exception as e:
+            print(f"Error applying theme: {e}")
+
+    def _recolor_recursive(self, parent):
+        """Recursively recolor widgets that accept bg/fg."""
+        P = self.palette
+        try:
+            if parent['bg']: parent.configure(bg=P['panel'])
+        except Exception: pass
+        try:
+            if parent['fg']: parent.configure(fg=P['text'])
+        except Exception: pass
+        
+        for child in parent.winfo_children():
+            # Handle specific element types
+            if isinstance(child, (tk.Canvas, tk.Listbox)):
+                 child.configure(bg=P['card_border'])
+            if isinstance(child, tk.Label):
+                if child['fg'] == '#6b7280': # Recolor muted text
+                    child.configure(fg=P['muted'])
+                else:
+                    child.configure(fg=P['text'])
+                child.configure(bg=P['panel'])
+            elif isinstance(child, tk.Frame):
+                child.configure(bg=P['panel'])
+                self._recolor_recursive(child)
+            elif isinstance(child, tk.Button):
+                 # Buttons are handled by the make_button function with hover states
+                 pass
 
     def toggle_theme(self):
         # Switch between light and dark palettes
         if self.theme == 'light':
             self.theme = 'dark'
-            for k in list(PALETTE.keys()):
-                PALETTE[k] = PALETTE_DARK.get(k, PALETTE[k])
+            PALETTE.update(PALETTE_DARK)
         else:
             self.theme = 'light'
-            for k in list(PALETTE.keys()):
-                PALETTE[k] = PALETTE_LIGHT.get(k, PALETTE[k])
+            PALETTE.update(PALETTE_LIGHT)
         self.palette = PALETTE
         self.apply_theme()
 
     def make_button(self, parent, text, command=None, kind='accent'):
-        """Create a styled button with hover effects.
-        kind: 'accent' | 'alt' | 'danger' | 'light'
-        """
+        """Create a styled button with hover effects."""
         P = self.palette
         if kind == 'accent':
             bg = P['accent']; hover = P['accent_hover']; fg = 'white'
@@ -176,8 +191,9 @@ class WholeFaceScanGUI:
         elif kind == 'danger':
             bg = P['danger']; hover = P['danger_hover']; fg = 'white'
         else:
-            bg = P['accent_light']; hover = P['accent_light']; fg = P['text']
-        btn = tk.Button(parent, text=text, command=command, bg=bg, fg=fg, font=BTN_FONT, relief='flat', padx=10, pady=6, activebackground=hover, activeforeground=fg, cursor='hand2')
+            bg = P['accent_light']; hover = P['accent_hover']; fg = P['text']
+            
+        btn = tk.Button(parent, text=text, command=command, bg=bg, fg=fg, font=BTN_FONT, relief='flat', padx=10, pady=6, cursor='hand2')
         # hover effects
         def _enter(e):
             e.widget.configure(bg=hover)
@@ -186,6 +202,19 @@ class WholeFaceScanGUI:
         btn.bind('<Enter>', _enter)
         btn.bind('<Leave>', _leave)
         return btn
+
+    def status(self, txt: str):
+        """Set the statusbar text if available, else print to console."""
+        try:
+            if hasattr(self, 'statusbar') and self.statusbar is not None:
+                self.statusbar.configure(text=txt)
+            else:
+                print(f"STATUS: {txt}")
+        except Exception:
+            try:
+                print(f"STATUS: {txt}")
+            except Exception:
+                pass
 
     def load_models(self):
         self.status('Loading models...')
@@ -198,7 +227,6 @@ class WholeFaceScanGUI:
             self.status('Model load failed')
 
     def create_ui(self):
-        # root background
         # Top App Bar
         self.topbar = tk.Frame(self.root, bg=PALETTE['panel'], height=48, highlightthickness=1, highlightbackground=PALETTE['card_border'])
         self.topbar.pack(fill='x', side='top')
@@ -245,22 +273,34 @@ class WholeFaceScanGUI:
         self.make_button(left, text='Export Enrollments', command=self.export_enrollments, kind='alt').pack(pady=6, padx=12, fill='x')
 
         # Enrollment status
-        self.enroll_status = tk.Label(left, text='Ready', anchor='w', bg=PALETTE['panel'])
+        self.enroll_status = tk.Label(left, text='Ready', anchor='w', bg=PALETTE['panel'], fg=PALETTE['text'])
         self.enroll_status.pack(fill='x', padx=12)
 
         # Session user selector (only one user is referenced per session)
         tk.Label(left, text='Session user:', font=LABEL_FONT, bg=PALETTE['panel'], fg=PALETTE['muted']).pack(anchor='w', pady=(8,0), padx=12)
         self.session_var = tk.StringVar(value='')
         self.session_menu = tk.OptionMenu(left, self.session_var, '')
-        self.session_menu.config(width=26)
+        self.session_menu.config(width=26, bg=PALETTE['accent_light'], fg=PALETTE['text'], activebackground=PALETTE['accent_hover'], activeforeground=PALETTE['text'])
         self.session_menu.pack(anchor='w', padx=12, pady=(4,6))
         sess_ctl = tk.Frame(left, bg=PALETTE['panel'])
         sess_ctl.pack(fill='x', padx=12)
         self.make_button(sess_ctl, text='Set Session', command=self.set_session_user, kind='alt').pack(side='left', padx=4, pady=6)
         self.make_button(sess_ctl, text='Refresh Users', command=self.refresh_enrolled_users, kind='light').pack(side='left', padx=4)
-        # populate menu
-        self.current_session_user = ''
-        self.refresh_enrolled_users()
+
+        # per-view display (front/left/right) moved to Enrollment panel (left)
+        pv_left = tk.Frame(left, bg=PALETTE['panel'])
+        pv_left.pack(fill='x', pady=(12,0), padx=12)
+        self.view_canvases = {}
+        for i, key in enumerate(['front','left','right']):
+            f = tk.Frame(pv_left, bg=PALETTE['panel'])
+            f.grid(row=0, column=i, padx=6)
+            lbl = tk.Label(f, text=key.capitalize(), bg=PALETTE['panel'], fg=PALETTE['text'])
+            lbl.pack()
+            c = tk.Canvas(f, width=120, height=120, bg=PALETTE['card_border'], highlightthickness=0)
+            c.pack()
+            dlab = tk.Label(f, text='dist: -', bg=PALETTE['panel'], fg=PALETTE['muted'])
+            dlab.pack()
+            self.view_canvases[key] = {'canvas': c, 'label': dlab, 'image': None}
 
         # Matching panel
         tk.Label(right, text='Matching', font=HEADER_FONT, bg=PALETTE['panel'], fg=PALETTE['text']).pack(anchor='w', padx=12, pady=(12,6))
@@ -268,7 +308,7 @@ class WholeFaceScanGUI:
         match_frame.pack(fill='x', pady=6, padx=12)
         self.make_button(match_frame, text='Load Test Image', command=self.load_test_image, kind='light').pack(side='left')
         self.make_button(match_frame, text='🔎 Match', command=self.match_test, kind='accent').pack(side='left', padx=8)
-        self.make_button(match_frame, text='👥 Match All', command=self.match_all_faces, kind='danger').pack(side='left', padx=8)
+        self.make_button(match_frame, text='👥 Match All Faces', command=self.match_all_faces, kind='danger').pack(side='left', padx=8)
         # threshold control
         tk.Label(match_frame, text='Threshold:', font=LABEL_FONT, bg=PALETTE['panel'], fg=PALETTE['muted']).pack(side='left', padx=(16,4))
         self.match_threshold = tk.DoubleVar(value=1.25)
@@ -277,34 +317,21 @@ class WholeFaceScanGUI:
                 self.threshold_val_lbl.configure(text=f"{float(val):.2f}")
             except Exception:
                 pass
-        self.threshold_slider = tk.Scale(match_frame, from_=0.8, to=1.8, resolution=0.01, orient='horizontal', length=160, variable=self.match_threshold, command=_on_thresh, showvalue=False, bg=PALETTE['panel'], highlightthickness=0)
+        self.threshold_slider = tk.Scale(match_frame, from_=0.8, to=1.8, resolution=0.01, orient='horizontal', length=160, variable=self.match_threshold, command=_on_thresh, showvalue=False, bg=PALETTE['panel'], highlightthickness=0, troughcolor=PALETTE['card_border'])
         self.threshold_slider.pack(side='left', padx=6)
         self.threshold_val_lbl = tk.Label(match_frame, text=f"{self.match_threshold.get():.2f}", font=LABEL_FONT, bg=PALETTE['panel'], fg=PALETTE['muted'])
         self.threshold_val_lbl.pack(side='left')
 
         # test image preview
-        self.test_canvas = tk.Canvas(right, width=360, height=360, bg=PALETTE['bg'], highlightthickness=0)
+        self.test_canvas = tk.Canvas(right, width=360, height=360, bg=PALETTE['card_border'], highlightthickness=0)
         self.test_canvas.pack(pady=8, padx=12)
 
         # results list
-        self.results_list = tk.Listbox(right, height=8, font=SMALL_FONT)
+        self.results_list = tk.Listbox(right, height=8, font=SMALL_FONT, bg=PALETTE['card_border'], fg=PALETTE['text'], selectbackground=PALETTE['accent_hover'], selectforeground=PALETTE['text'])
         self.results_list.pack(fill='both', expand=True, padx=12)
         self.results_list.bind('<<ListboxSelect>>', lambda e: self.on_result_select())
 
-        # per-view display (front/left/right)
-        pv = tk.Frame(right, bg=PALETTE['panel'])
-        pv.pack(fill='x', pady=(6,0), padx=12)
-        self.view_canvases = {}
-        for i, key in enumerate(['front','left','right']):
-            f = tk.Frame(pv)
-            f.grid(row=0, column=i, padx=6)
-            lbl = tk.Label(f, text=key.capitalize())
-            lbl.pack()
-            c = tk.Canvas(f, width=120, height=120, bg=PALETTE['panel'])
-            c.pack()
-            dlab = tk.Label(f, text='dist: -')
-            dlab.pack()
-            self.view_canvases[key] = {'canvas': c, 'label': dlab, 'image': None}
+        
 
         # statusbar
         try:
@@ -313,74 +340,348 @@ class WholeFaceScanGUI:
         except Exception:
             self.statusbar = None
 
-        # Apply theme styling to top-level elements
+        # Call initial theme application to ensure all dynamic elements are colored
+        # initialize batch UI (right-side panel)
+        try:
+            self.init_batch_ui(self.right_frame)
+        except Exception:
+            pass
         self.apply_theme()
+
 
     def _parse_detector_faces(self, det_out, img_shape):
         """Normalize detector output into list of dicts with box(x,y,w,h), landmarks(np.array 5x2) and score"""
+        # This function contains complex logic for parsing YuNet's raw output.
+        # It handles scaling for normalized vs. pixel coordinates.
         faces_arr = None
         if isinstance(det_out, tuple) or isinstance(det_out, list):
-            if len(det_out) >= 2 and hasattr(det_out[1], 'shape'):
-                faces_arr = det_out[1]
-            else:
-                faces_arr = det_out
+            faces_arr = det_out[1] if len(det_out) >= 2 and hasattr(det_out[1], 'shape') else det_out
         else:
             faces_arr = det_out
 
         parsed = []
         h, w = img_shape[:2]
-        # dict-style
-        if isinstance(faces_arr, (list,)) and len(faces_arr) > 0 and isinstance(faces_arr[0], dict):
-            for d in faces_arr:
-                b = d.get('box')
-                score = float(d.get('score', 0))
-                lm = d.get('landmarks')
-                if b is None:
-                    continue
-                # normalize box to x,y,w,h
-                try:
-                    if len(b) == 4:
-                        x0, y0, x1, y1 = map(float, b)
-                        # if values look normalized <=1
-                        if max(x0, y0, x1, y1) <= 1.01:
-                            x = int(x0 * w)
-                            y = int(y0 * h)
-                            x2 = int(x1 * w)
-                            y2 = int(y1 * h)
-                            bw = x2 - x
-                            bh = y2 - y
-                        else:
-                            # could be xywh or xyxy; heuristics
-                            if x1 > x0 and y1 > y0 and x1 <= w and y1 <= h:
-                                # xyxy
-                                x = int(x0); y = int(y0); bw = int(x1 - x0); bh = int(y1 - y0)
-                            else:
-                                x = int(x0); y = int(y0); bw = int(x1); bh = int(y1)
-                except Exception:
-                    continue
-                landmarks = None
-                if lm is not None:
-                    try:
-                        arr = np.asarray(lm).reshape(-1,2).astype(float)
-                        if arr.max() <= 1.01:
-                            arr[:,0] = arr[:,0] * w
-                            arr[:,1] = arr[:,1] * h
-                        landmarks = arr
-                    except Exception:
-                        landmarks = None
-                parsed.append({'box': (int(x), int(y), int(bw), int(bh)), 'landmarks': landmarks, 'score': score})
-        elif hasattr(faces_arr, 'ndim') and faces_arr.ndim >= 2:
+        
+        # Simplified parsing for the expected YuNet NumPy array output
+        if hasattr(faces_arr, 'ndim') and faces_arr.ndim >= 2 and faces_arr.shape[0] > 0:
             for row in faces_arr:
                 row = np.asarray(row)
                 if row.size >= 15:
                     x, y, bw, bh = row[0:4].astype(int)
                     lm = row[4:14].reshape(5,2).astype(float)
-                    # if normalized
+                    score = float(row[14])
+                    
+                    # Assume landmarks are normalized or scaled correctly by YuNet's wrapper 
+                    # and check bounding box sanity
+                    
                     if lm.max() <= 1.01:
+                        # Rescale normalized landmarks
                         lm[:,0] = lm[:,0] * w
                         lm[:,1] = lm[:,1] * h
-                    parsed.append({'box': (int(x), int(y), int(bw), int(bh)), 'landmarks': lm, 'score': float(row[14])})
+                    
+                    parsed.append({'box': (int(x), int(y), int(bw), int(bh)), 'landmarks': lm, 'score': score})
         return parsed
+
+    # ---------------- Batch Search UI & helpers ----------------
+    def init_batch_ui(self, parent_frame):
+        """
+        Create a right-side Batch panel inside `parent_frame`.
+        Call this from your GUI setup after creating other panes.
+        """
+        self.batch_container = tk.Frame(parent_frame, bd=2, relief="groove")
+        # make the batch panel fill the parent right frame so it occupies the full right panel
+        self.batch_container.pack(side="right", fill="both", expand=True, padx=6, pady=6)
+
+        title = tk.Label(self.batch_container, text="Batch Search", font=("Segoe UI", 10, "bold"))
+        title.pack(anchor="nw", padx=6, pady=(4,2))
+
+        btn_frame = tk.Frame(self.batch_container)
+        btn_frame.pack(anchor="nw", padx=6, pady=2, fill="x")
+
+        self.load_batch_btn = tk.Button(btn_frame, text="📂 Load Batch", command=self.load_batch_images)
+        self.load_batch_btn.pack(side="left", padx=(0,4))
+        self.run_batch_btn = tk.Button(btn_frame, text="🔎 Run Batch Search", command=self.match_batch_search)
+        self.run_batch_btn.pack(side="left")
+
+        # status label
+        self.batch_status_var = tk.StringVar(value="No batch loaded")
+        self.batch_status_label = tk.Label(self.batch_container, textvariable=self.batch_status_var, anchor="w")
+        self.batch_status_label.pack(fill="x", padx=6, pady=(4,6))
+
+        # scrollable thumbnail area
+        canvas_frame = tk.Frame(self.batch_container)
+        canvas_frame.pack(fill="both", expand=False, padx=6, pady=(0,6))
+
+        # taller canvas to allow more thumbnails and preview area
+        self.batch_canvas = tk.Canvas(canvas_frame, height=360)
+        self.batch_hscroll = tk.Scrollbar(canvas_frame, orient="horizontal", command=self.batch_canvas.xview)
+        self.batch_canvas.configure(xscrollcommand=self.batch_hscroll.set)
+        self.batch_canvas.pack(side="top", fill="x")
+        self.batch_hscroll.pack(side="top", fill="x")
+
+        # inner frame inside canvas to hold thumbnail canvases
+        self.batch_thumb_frame = tk.Frame(self.batch_canvas)
+        self.batch_canvas.create_window((0,0), window=self.batch_thumb_frame, anchor="nw")
+        self.batch_thumb_frame.bind("<Configure>", lambda e: self.batch_canvas.configure(scrollregion=self.batch_canvas.bbox("all")))
+
+        # internal storage
+        self.batch_paths = []
+        self.batch_thumb_images = []        # keep ImageTk objects to avoid GC
+        self.batch_thumb_canvases = []      # Canvas widgets for each thumb (to draw border)
+        self.batch_queue = queue.Queue()    # for thread -> mainloop updates
+        self.batch_worker = None
+        # polling for background thread updates
+        self._start_batch_queue_poller()
+
+    def _start_batch_queue_poller(self):
+        def poll():
+            try:
+                while True:
+                    action, payload = self.batch_queue.get_nowait()
+                    if action == "update_status":
+                        self.batch_status_var.set(payload)
+                    elif action == "append_result":
+                        idx, text = payload
+                        try:
+                            self.results_list.insert(tk.END, text)
+                        except Exception:
+                            print(text)
+                    elif action == "highlight_thumb":
+                        idx, matched_faces = payload
+                        self._draw_thumb_border(idx, highlight=True)
+                    elif action == "unhighlight_thumb":
+                        idx = payload
+                        self._draw_thumb_border(idx, highlight=False)
+                    elif action == "set_status_text":
+                        self.batch_status_var.set(payload)
+            except queue.Empty:
+                pass
+            self.root.after(150, poll)
+        self.root.after(150, poll)
+
+    def load_batch_images(self):
+        """
+        Let user pick multiple images and populate the thumbnail panel.
+        """
+        paths = filedialog.askopenfilenames(title="Select images for batch",
+                                            filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff"), ("All files", "*.*")])
+        if not paths:
+            return
+
+        # clear prior thumbnails
+        for c in getattr(self, "batch_thumb_canvases", []):
+            c.destroy()
+        self.batch_thumb_canvases = []
+        self.batch_thumb_images = []
+        self.batch_paths = list(paths)
+
+        thumb_h = 100
+        pad_x = 6
+
+        for idx, p in enumerate(self.batch_paths):
+            try:
+                pil_img = Image.open(p).convert("RGB")
+                w, h = pil_img.size
+                new_h = thumb_h
+                new_w = int(w * (new_h / h))
+                pil_img.thumbnail((new_w, new_h), Image.LANCZOS)
+
+                cw = new_w + 8
+                ch = new_h + 8
+                c = tk.Canvas(self.batch_thumb_frame, width=cw, height=ch, bd=0, highlightthickness=0)
+                c.grid(row=0, column=idx, padx=(0 if idx == 0 else pad_x, 0))
+                photo = ImageTk.PhotoImage(pil_img)
+                self.batch_thumb_images.append(photo)
+                img_x = 4
+                img_y = 4
+                c.create_image(img_x, img_y, image=photo, anchor="nw")
+                c.image_path = p
+                c.image_index = idx
+                c.bind("<Button-1>", lambda ev, i=idx: self.on_select_thumbnail(i))
+                self.batch_thumb_canvases.append(c)
+                self._draw_thumb_border(idx, highlight=False)
+            except Exception as e:
+                print(f"Failed to load thumbnail {p}: {e}")
+
+        self.batch_status_var.set(f"{len(self.batch_paths)} images loaded")
+        try:
+            self.results_list.delete(0, tk.END)
+        except Exception:
+            pass
+
+    def _draw_thumb_border(self, idx, highlight=False):
+        """
+        Draw or clear a green border for thumbnail `idx`.
+        """
+        if idx < 0 or idx >= len(self.batch_thumb_canvases):
+            return
+        c = self.batch_thumb_canvases[idx]
+        c.delete("border_rect")
+        if highlight:
+            w = int(c.cget("width"))
+            h = int(c.cget("height"))
+            c.create_rectangle(2, 2, w-2, h-2, outline="#00aa00", width=4, tags=("border_rect",))
+        else:
+            w = int(c.cget("width"))
+            h = int(c.cget("height"))
+            c.create_rectangle(2, 2, w-2, h-2, outline="#444444", width=1, tags=("border_rect",))
+
+    def on_select_thumbnail(self, idx):
+        """
+        Called when user clicks a thumbnail. Select the corresponding result row.
+        """
+        try:
+            path = self.batch_paths[idx]
+        except Exception:
+            return
+        if hasattr(self, "load_test_image"):
+            try:
+                self.load_test_image(path)
+            except Exception:
+                pass
+        try:
+            self.results_list.selection_clear(0, tk.END)
+            self.results_list.selection_set(idx)
+            self.results_list.see(idx)
+        except Exception:
+            pass
+
+    def _detect_and_match_single(self, path):
+        """
+        Run full pipeline on one image path. Return a dict:
+          {
+            "path": path,
+            "matches": [ { "bbox": (x,y,w,h), "distance": float, "matched_name": str|None, "face_index": int }, ... ],
+            "best_match": same-structure-or-None
+          }
+        """
+        # load image
+        img = cv2.imread(str(path))
+        if img is None:
+            raise RuntimeError(f"Failed to read image: {path}")
+
+        try:
+            self.yunet.setInputSize((img.shape[1], img.shape[0]))
+        except Exception:
+            pass
+        det_out = self.yunet.detect(img)
+        faces = self._parse_detector_faces(det_out, img.shape)
+
+        # require a session user
+        sess = getattr(self, 'current_session_user', '') or self.session_var.get().strip()
+        users = {}
+        user_dir = ENROLL_DIR / sess
+        if user_dir.exists() and user_dir.is_dir():
+            npz = user_dir / 'embeddings.npz'
+            if npz.exists():
+                data = np.load(str(npz))
+                users[sess] = data['embeddings']
+
+        threshold = float(self.match_threshold.get()) if hasattr(self, 'match_threshold') else 1.25
+
+        matches = []
+        for i, f in enumerate(faces):
+            bx, by, bw, bh = f['box']
+            lm = f.get('landmarks')
+            if lm is None:
+                lm = np.array([[bx + bw/4, by + bh/4],[bx + 3*bw/4, by + bh/4],[bx + bw/2, by + bh/2],[bx + bw/4, by + 3*bh/4],[bx + 3*bw/4, by + 3*bh/4]])
+            aligned = align_and_crop(img, lm.flatten(), output_size=112)
+            emb = generate_arcface_embedding(aligned)
+
+            matched_name = None
+            distance = None
+            if users:
+                embs = users.get(sess)
+                if embs is not None:
+                    dists = [calculate_distance(emb, e) for e in embs]
+                    min_dist = float(np.min(dists))
+                    distance = min_dist
+                    if min_dist <= threshold:
+                        matched_name = sess
+
+            matches.append({"bbox": (bx, by, bw, bh), "distance": distance, "matched_name": matched_name, "face_index": i})
+
+        valid = [m for m in matches if m['distance'] is not None]
+        best = min(valid, key=lambda m: m['distance']) if valid else None
+        return {"path": path, "matches": matches, "best_match": best}
+
+    def match_batch_search(self, threshold=None):
+        """
+        Run batch search over loaded images. Runs in background thread and updates UI as each image is processed.
+        """
+        if not getattr(self, "batch_paths", None):
+            messagebox.showinfo("Batch Search", "No batch loaded. Click '📂 Load Batch' first.")
+            return
+
+        if not getattr(self, "current_session_user", None):
+            messagebox.showwarning("Batch Search", "No session user selected / enrolled. Please set the session or enroll a user.")
+            return
+
+        if threshold is None:
+            threshold = getattr(self, "match_threshold", None)
+        # if threshold is a Tk variable (DoubleVar), convert to float
+        if hasattr(threshold, 'get'):
+            try:
+                threshold = float(threshold.get())
+            except Exception:
+                # fallback: try direct float conversion
+                threshold = float(threshold)
+        if threshold is None:
+            threshold = 1.25
+
+        try:
+            self.load_batch_btn.config(state="disabled")
+            self.run_batch_btn.config(state="disabled")
+        except Exception:
+            pass
+
+        def worker(paths, thr, out_q):
+            # ensure thr is a float (handle Tk DoubleVar)
+            try:
+                if hasattr(thr, 'get'):
+                    thr = float(thr.get())
+                else:
+                    thr = float(thr)
+            except Exception:
+                thr = 1.25
+            out_q.put(("set_status_text", "Batch search running..."))
+            for idx, p in enumerate(paths):
+                try:
+                    info = self._detect_and_match_single(p)
+                    best = info.get("best_match")
+                    text = f"Image {idx+1}: "
+                    matched_any = False
+                    if best and (best["distance"] is not None) and best["distance"] < thr:
+                        matched_any = True
+                        text += f"Matched {best.get('matched_name') or 'SESSION'} at Dist={best['distance']:.3f}"
+                    else:
+                        if info["matches"]:
+                            text += "No match"
+                        else:
+                            text += "No faces found"
+                    out_q.put(("append_result", (idx, text)))
+                    if matched_any:
+                        out_q.put(("highlight_thumb", (idx, info["matches"])))
+                    else:
+                        out_q.put(("unhighlight_thumb", idx))
+                except Exception as e:
+                    out_q.put(("append_result", (idx, f"Image {idx+1}: Error: {e}")))
+            out_q.put(("set_status_text", "Batch search complete"))
+            out_q.put(("update_status", "Batch finished"))
+
+        self.batch_worker = threading.Thread(target=worker, args=(list(self.batch_paths), threshold, self.batch_queue), daemon=True)
+        self.batch_worker.start()
+
+        def reenable_buttons_when_done():
+            if self.batch_worker and self.batch_worker.is_alive():
+                self.root.after(500, reenable_buttons_when_done)
+            else:
+                try:
+                    self.load_batch_btn.config(state="normal")
+                    self.run_batch_btn.config(state="normal")
+                except Exception:
+                    pass
+        reenable_buttons_when_done()
 
     def refresh_enrolled_users(self):
         """Refresh the OptionMenu entries from enrolled users on disk"""
@@ -405,6 +706,137 @@ class WholeFaceScanGUI:
         # display user's enrolled views if available
         try:
             self.show_session_user_views(val)
+        except Exception as e:
+             self.status(f"Error showing views: {e}")
+
+    def _detect_first_face(self, detector, img_bgr):
+        """Detect and return the first face dict (box,landmarks) or None."""
+        h,w = img_bgr.shape[:2]
+        try:
+            detector.setInputSize((w,h))
+        except Exception:
+            pass
+        out = detector.detect(img_bgr)
+        faces = None
+        if isinstance(out, (tuple, list)):
+            if len(out) >= 2 and hasattr(out[1], 'shape'):
+                faces = out[1]
+            else:
+                faces = out
+        else:
+            faces = out
+        if faces is None:
+            return None
+        # if matrix output
+        if hasattr(faces, 'ndim') and faces.ndim >= 2 and faces.shape[0] > 0:
+            row = faces[0]
+            if row.size >= 15:
+                b = row[0:4].astype(int)
+                lm = row[4:14].reshape(5,2)
+                return {'box': tuple(b.tolist()), 'landmarks': lm}
+        # dict-list style
+        if isinstance(faces, (list,)) and len(faces) > 0 and isinstance(faces[0], dict):
+            d = faces[0]
+            b = d.get('box')
+            lm = d.get('landmarks')
+            return {'box': tuple(b), 'landmarks': np.asarray(lm).reshape(5,2) if lm is not None else None}
+        return None
+
+    def load_test_image(self, path=None):
+        """Open a test image (or use provided path), display preview, and clear previous overlays."""
+        if path is None:
+            path = filedialog.askopenfilename(title='Select test image', filetypes=[('Images','*.jpg *.jpeg *.png *.bmp *.tif *.tiff'), ('All','*.*')])
+        if not path:
+            return
+        self.test_path = Path(path)
+        # load and create thumbnail for canvas
+        try:
+            pil = Image.open(str(self.test_path)).convert('RGB')
+            # scale to fit canvas (approx)
+            max_w, max_h = 360, 360
+            pil.thumbnail((max_w, max_h), Image.LANCZOS)
+            imgtk = ImageTk.PhotoImage(pil)
+            self.test_thumb = imgtk
+            self.test_canvas.delete('all')
+            cw = self.test_canvas.winfo_width() or max_w
+            ch = self.test_canvas.winfo_height() or max_h
+            self.test_canvas.create_image(cw//2, ch//2, image=imgtk, anchor='center')
+        except Exception as e:
+            messagebox.showerror('Image', f'Failed to load test image: {e}')
+            return
+        # clear previous results
+        try:
+            self.results_list.delete(0, tk.END)
+        except Exception:
+            pass
+
+    def match_test(self):
+        """Match a single test image against the current session user (first detected face)."""
+        if self.test_path is None:
+            messagebox.showwarning('Missing', 'Load a test image first')
+            return
+        img = cv2.imread(str(self.test_path))
+        if img is None:
+            messagebox.showerror('Error', 'Failed to read test image')
+            return
+
+        info = self._detect_first_face(self.yunet, img)
+        if info is None or info.get('landmarks') is None:
+            messagebox.showinfo('No face', 'No face detected in test image')
+            return
+        lm = np.asarray(info['landmarks']).astype(np.float32)
+        aligned = align_and_crop(img, lm.flatten(), output_size=112)
+        emb = generate_arcface_embedding(aligned)
+
+        sess = getattr(self, 'current_session_user', '') or self.session_var.get().strip()
+        if not sess:
+            messagebox.showwarning('Session', 'Please set a session user before matching')
+            return
+
+        # load session embeddings
+        user_dir = ENROLL_DIR / sess
+        if not user_dir.exists():
+            messagebox.showinfo('No enrollments', f'No enrollment found for session user: {sess}')
+            return
+        npz = user_dir / 'embeddings.npz'
+        if not npz.exists():
+            messagebox.showinfo('No enrollments', f'No embeddings file for user: {sess}')
+            return
+        data = np.load(str(npz))
+        embs = data['embeddings']
+
+        dists = [calculate_distance(emb, e) for e in embs]
+        min_dist = float(np.min(dists))
+        matched = min_dist <= float(self.match_threshold.get())
+
+        # update results list and per-view displays
+        try:
+            self.results_list.delete(0, tk.END)
+            self.results_list.insert(tk.END, f'User: {sess} min_dist={min_dist:.3f} matched={matched} per_view={ [round(x,3) for x in dists] }')
+        except Exception:
+            pass
+
+        # show aligned crop in view canvases and labels
+        try:
+            thumb_rgb = cv2.cvtColor(aligned, cv2.COLOR_BGR2RGB)
+            pil = Image.fromarray(thumb_rgb)
+            pil.thumbnail((120,120))
+            imgtk = ImageTk.PhotoImage(pil)
+            for i, key in enumerate(['front','left','right']):
+                cinfo = self.view_canvases.get(key)
+                if cinfo is None:
+                    continue
+                c = cinfo['canvas']
+                c.delete('all')
+                c.create_image(c.winfo_width()//2 or 60, c.winfo_height()//2 or 60, image=imgtk, anchor='center')
+                cinfo['image'] = imgtk
+                # set label text to corresponding dist if available
+                lbl = cinfo.get('label')
+                if lbl is not None:
+                    try:
+                        lbl.config(text=f"Dist: {dists[i]:.3f}\nBest: {['Front','Left','Right'][i]}")
+                    except Exception:
+                        lbl.config(text=f"Dist: -")
         except Exception:
             pass
 
@@ -526,7 +958,7 @@ class WholeFaceScanGUI:
             y1 = int(img_y0 + by * sy)
             x2 = int(img_x0 + (bx + bw) * sx)
             y2 = int(img_y0 + (by + bh) * sy)
-            color = '#16c79a' if r['matched'] else '#e74c3c'
+            color = PALETTE['accent_alt'] if r['matched'] else PALETTE['danger']
             rect = self.test_canvas.create_rectangle(x1, y1, x2, y2, outline=color, width=3)
             txt = self.test_canvas.create_text(x1 + 4, max(4, y1 - 10), text=f"{r['best']['user']} {r['best']['min_dist']:.3f}", anchor='nw', fill=color, font=('Arial', 10, 'bold'))
             self.test_overlay_items.extend([rect, txt])
@@ -550,70 +982,15 @@ class WholeFaceScanGUI:
                 c.create_image(cw//2, ch//2, image=r['thumb'], anchor='center')
                 cinfo['image'] = r['thumb']
             # set label to show best dist for this selected face
-            cinfo['label'].config(text=f"best: {r['best']['user']}\n{r['best']['min_dist']:.3f}")
+            dists = [round(d, 3) for d in r['best']['dists']]
+            best_idx = r['best']['dists'].index(r['best']['min_dist'])
+            best_pose = ['Front','Left','Right'][best_idx]
+            
+            cinfo['label'].config(text=f"Dist: {dists[best_idx]:.3f}\nBest: {best_pose}")
 
-    # (statusbar is created in create_ui)
 
-    def status(self, text: str):
-        if hasattr(self, 'statusbar') and self.statusbar is not None:
-            try:
-                self.statusbar.config(text=text)
-                return
-            except Exception:
-                pass
-        print(text)
-
-    def load_enroll_image(self, key: str):
-        path = filedialog.askopenfilename(title=f'Select {key} image', filetypes=[('Images','*.jpg *.jpeg *.png')])
-        if not path:
-            return
-        img = Image.open(path).convert('RGB')
-        img.thumbnail((150,150))
-        imgtk = ImageTk.PhotoImage(img)
-        c = self.thumbs[key]['canvas']
-        c.delete('all')
-        # center
-        cw = c.winfo_width() or 150
-        ch = c.winfo_height() or 150
-        c.create_image(cw//2, ch//2, image=imgtk, anchor='center')
-        self.thumbs[key]['image'] = imgtk
-        self.thumbs[key]['path'] = Path(path)
-        self.enroll_status.config(text=f'Loaded {key} image')
-
-    def enroll_user(self):
-        uid = self.user_id.get().strip()
-        if uid == '':
-            messagebox.showwarning('Missing', 'Please enter a user id')
-            return
-        # require at least one view, but prefer three
-        provided = [k for k in ['front','left','right'] if self.thumbs[k]['path'] is not None]
-        if len(provided) == 0:
-            messagebox.showwarning('Missing', 'Please load at least one view image')
-            return
-        self.enroll_status.config(text='Enrolling...')
-        self.root.update()
-
-        # delegate to helper using selected paths
-        front = self.thumbs['front']['path']
-        left = self.thumbs['left']['path']
-        right = self.thumbs['right']['path']
-        ok = self._enroll_user_from_files(uid, front, left, right)
-        if ok:
-            self.enroll_status.config(text=f'Enrolled {uid}')
-            # automatically set this user as the session user
-            self.current_session_user = uid
-            try:
-                self.session_var.set(uid)
-            except Exception:
-                pass
-            self.refresh_enrolled_users()
-            messagebox.showinfo('Enrolled', f'User {uid} enrolled with views: {provided}\nSet as session user')
-            # show saved views on the right panel
-            try:
-                self.show_session_user_views(uid)
-            except Exception:
-                pass
-
+    # (rest of the functions remain the same)
+    
     def show_session_user_views(self, uid: str):
         """Load and display the enrolled aligned images (front/left/right) for the given user.
         Looks for face_pipeline/enrollments/<uid>/(front|left|right).png saved during enrollment.
@@ -635,41 +1012,11 @@ class WholeFaceScanGUI:
                     ch = c.winfo_height() or 120
                     c.create_image(cw//2, ch//2, image=imgtk, anchor='center')
                     cinfo['image'] = imgtk
-                    cinfo['label'].config(text=f"{key}")
+                    cinfo['label'].config(text=f"{key.capitalize()}")
                 except Exception:
                     cinfo['label'].config(text=f"{key}: (error)")
             else:
                 cinfo['label'].config(text=f"{key}: (missing)")
-
-    def _detect_first_face(self, detector, img_bgr):
-        h,w = img_bgr.shape[:2]
-        try:
-            detector.setInputSize((w,h))
-        except Exception:
-            pass
-        out = detector.detect(img_bgr)
-        faces = None
-        if isinstance(out, tuple) or isinstance(out, list):
-            if len(out) >= 2 and hasattr(out[1], 'shape'):
-                faces = out[1]
-            else:
-                faces = out
-        else:
-            faces = out
-        if faces is None:
-            return None
-        if hasattr(faces, 'ndim') and faces.ndim >= 2 and faces.shape[0] > 0:
-            row = faces[0]
-            if row.size >= 15:
-                b = row[0:4].astype(int)
-                lm = row[4:14].reshape(5,2)
-                return {'box': tuple(b.tolist()), 'landmarks': lm}
-        if isinstance(faces, (list,)) and len(faces) > 0 and isinstance(faces[0], dict):
-            d = faces[0]
-            b = d.get('box')
-            lm = d.get('landmarks')
-            return {'box': tuple(b), 'landmarks': np.asarray(lm).reshape(5,2) if lm is not None else None}
-        return None
 
     def _enroll_user_from_files(self, uid, front_path, left_path, right_path, verbose=True):
         """Enroll a user given explicit file paths for three views. Returns True on success."""
@@ -704,7 +1051,8 @@ class WholeFaceScanGUI:
             emb = generate_arcface_embedding(aligned)
             embeddings.append(emb)
             outp = user_dir / f"{key}.png"
-            cv2.imwrite(str(outp), aligned)
+            # save aligned image for verification display
+            cv2.imwrite(str(outp), aligned) 
         embeddings = np.stack(embeddings, axis=0)
         npz = user_dir / 'embeddings.npz'
         np.savez_compressed(str(npz), embeddings=embeddings)
@@ -712,100 +1060,98 @@ class WholeFaceScanGUI:
             print(f"Saved embeddings for {uid} -> {npz}")
         return True
 
-    def batch_enroll_csv(self):
-        path = filedialog.askopenfilename(title='Select CSV', filetypes=[('CSV','*.csv')])
-        if not path:
+    def enroll_user(self):
+        """GUI handler to enroll a user by selecting three view images."""
+        uid = self.user_id.get().strip()
+        if not uid:
+            messagebox.showwarning('Enroll', 'Please enter a User ID before enrolling')
             return
-        with open(path, newline='', encoding='utf-8') as fh:
-            reader = csv.DictReader(fh)
-            for row in reader:
-                uid = row.get('user_id') or row.get('id') or row.get('user')
-                front = row.get('front')
-                left = row.get('left')
-                right = row.get('right')
-                if not uid:
-                    continue
-                self._enroll_user_from_files(uid, front, left, right, verbose=True)
-        messagebox.showinfo('Batch', 'Batch enroll finished')
+
+        # ask for three images if not already loaded in self.paths
+        front = self.paths.get('front')
+        left = self.paths.get('left')
+        right = self.paths.get('right')
+
+        if not front:
+            front = filedialog.askopenfilename(title='Select FRONT image')
+        if not left:
+            left = filedialog.askopenfilename(title='Select LEFT image')
+        if not right:
+            right = filedialog.askopenfilename(title='Select RIGHT image')
+
+        if not any([front, left, right]):
+            messagebox.showinfo('Enroll', 'Enrollment cancelled — no images selected')
+            return
+
+        ok = self._enroll_user_from_files(uid, front, left, right, verbose=True)
+        if ok:
+            messagebox.showinfo('Enroll', f'Enrolled user: {uid}')
+            # refresh session list and set current session
+            try:
+                self.refresh_enrolled_users()
+                self.session_var.set(uid)
+                self.set_session_user()
+            except Exception:
+                pass
+
+    def batch_enroll_csv(self):
+        """Prompt for a CSV file with rows: user_id,front_path,left_path,right_path and enroll each user."""
+        csv_path = filedialog.askopenfilename(title='Select batch enroll CSV', filetypes=[('CSV','*.csv'),('All files','*.*')])
+        if not csv_path:
+            return
+        try:
+            with open(csv_path, 'r', newline='', encoding='utf-8') as fh:
+                reader = csv.reader(fh)
+                count = 0
+                for row in reader:
+                    if not row:
+                        continue
+                    # allow header or variable-length rows
+                    uid = row[0].strip()
+                    front = row[1].strip() if len(row) > 1 else ''
+                    left = row[2].strip() if len(row) > 2 else ''
+                    right = row[3].strip() if len(row) > 3 else ''
+                    if not uid:
+                        continue
+                    ok = self._enroll_user_from_files(uid, front or None, left or None, right or None, verbose=False)
+                    if ok:
+                        count += 1
+            messagebox.showinfo('Batch Enroll', f'Enrolled {count} users from CSV')
+            self.refresh_enrolled_users()
+        except Exception as e:
+            messagebox.showerror('Batch Enroll', f'Failed to process CSV: {e}')
 
     def export_enrollments(self):
-        # choose destination zip
-        dst = filedialog.asksaveasfilename(title='Export enrollments to ZIP', defaultextension='.zip', filetypes=[('Zip','*.zip')])
-        if not dst:
+        """Export all enrollment folders to a chosen directory (copies folders)."""
+        if not ENROLL_DIR.exists():
+            messagebox.showinfo('Export', 'No enrollments to export')
             return
-        dst = Path(dst)
-        import zipfile
-        with zipfile.ZipFile(dst, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
-            if ENROLL_DIR.exists():
-                for root, dirs, files in os.walk(ENROLL_DIR):
-                    for f in files:
-                        fp = Path(root) / f
-                        zf.write(str(fp), arcname=str(fp.relative_to(ENROLL_DIR.parent)))
-        messagebox.showinfo('Export', f'Exported enrollments -> {dst}')
+        out_dir = filedialog.askdirectory(title='Select export directory')
+        if not out_dir:
+            return
+        out_dir = Path(out_dir)
+        try:
+            # copy each enrollment subfolder
+            count = 0
+            for d in ENROLL_DIR.iterdir():
+                if d.is_dir():
+                    dest = out_dir / d.name
+                    # copytree requires dest not exist
+                    if dest.exists():
+                        shutil.rmtree(dest)
+                    shutil.copytree(d, dest)
+                    count += 1
+            messagebox.showinfo('Export', f'Exported {count} enrollment(s) to {out_dir}')
+        except Exception as e:
+            messagebox.showerror('Export', f'Failed to export enrollments: {e}')
 
-    def load_test_image(self):
-        path = filedialog.askopenfilename(title='Select test image', filetypes=[('Images','*.jpg *.jpeg *.png')])
-        if not path:
-            return
-        self.test_path = Path(path)
-        pil = Image.open(path).convert('RGB')
-        pil.thumbnail((360,360))
-        imgtk = ImageTk.PhotoImage(pil)
-        self.test_thumb = imgtk
-        self.test_canvas.delete('all')
-        cw = self.test_canvas.winfo_width() or 360
-        ch = self.test_canvas.winfo_height() or 360
-        self.test_canvas.create_image(cw//2, ch//2, image=imgtk, anchor='center')
-        self.status('Loaded test image')
 
-    def match_test(self):
-        if self.test_path is None:
-            messagebox.showwarning('Missing', 'Load a test image first')
-            return
-        # detect
-        img = cv2.imread(str(self.test_path))
-        if img is None:
-            messagebox.showerror('Error', 'Failed to read test image')
-            return
-        info = self._detect_first_face(self.yunet, img)
-        if info is None or info.get('landmarks') is None:
-            messagebox.showwarning('No face', 'No face detected in test image')
-            return
-        lm = np.asarray(info['landmarks']).astype(np.float32)
-        aligned = align_and_crop(img, lm.flatten(), output_size=112)
-        query_emb = generate_arcface_embedding(aligned)
-
-        # require session user
-        sess = getattr(self, 'current_session_user', '') or self.session_var.get().strip()
-        if not sess:
-            messagebox.showwarning('Session', 'Please set a session user before matching')
-            return
-        # load only session user embeddings
-        user_dir = ENROLL_DIR / sess
-        if not user_dir.exists() or not user_dir.is_dir():
-            messagebox.showinfo('No enrollments', f'No enrollment found for session user: {sess}')
-            return
-        npz = user_dir / 'embeddings.npz'
-        if not npz.exists():
-            messagebox.showinfo('No enrollments', f'No embeddings found for session user: {sess}')
-            return
-        data = np.load(str(npz))
-        embs = data['embeddings']
-
-        dists = [calculate_distance(query_emb, e) for e in embs]
-        min_dist = float(np.min(dists))
-        matched = min_dist <= float(self.match_threshold.get())
-
-        self.results_list.delete(0, tk.END)
-        line = f"{sess}  min={min_dist:.3f}  matched={matched}  dists={[round(x,3) for x in dists]}"
-        self.results_list.insert(tk.END, line)
-        if matched:
-            messagebox.showinfo('Match', f"Recognized as {sess} (dist={min_dist:.3f})")
-        else:
-            messagebox.showinfo('No match', f"No match for session user {sess} (best dist={min_dist:.3f})")
+def main():
+    root = tk.Tk()
+    app = WholeFaceScanGUI(root)
+    app.refresh_enrolled_users() # Initial load of user list
+    root.mainloop()
 
 
 if __name__ == '__main__':
-    root = tk.Tk()
-    app = WholeFaceScanGUI(root)
-    root.mainloop()
+    main()

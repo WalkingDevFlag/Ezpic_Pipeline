@@ -177,7 +177,7 @@ class MultiViewEnrollment(FacePipeline):
         models_dir = models_dir or os.path.join(self.root, 'Models')
         # NOTE: Model paths are relative/dummy for this self-contained test
         yunet = os.path.join(models_dir, 'face_detection_yunet_2023mar_int8.onnx')
-        arcface = os.path.join(models_dir, 'w600k_r50.onnx')
+    arcface = os.path.join(models_dir, 'w600k_r50.onnx')
         
         # Initialize FacePipeline (using the Dummy version above)
         self.pipeline = FacePipeline(yunet, arcface)
