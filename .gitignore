@@ -1,3 +1,37 @@
+# Python / cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# virtualenv
+.venv/
+env/
+venv/
+
+# IDE / OS
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
+
+# Data, models, large files (do NOT commit these)
+Images/
+Models/
+face_map_embeddings.npz
+face_map.json
+face_pipeline/calibration/
+face_pipeline/enrollments/
+*.npz
+*.onnx
+*.zip
+
+# bytecode and build
+build/
+dist/
+
+# local python cache
+*.egg-info/
 # Ignore large model binaries
 Models/*.onnx
 .vscode/
